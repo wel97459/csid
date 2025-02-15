@@ -2,13 +2,15 @@
 // (based on jsSID, this version has much lower CPU-usage, as mainloop runs at samplerate)
 // License: WTF - Do what the fuck you want with this code, but please mention me as its original author.
 
-#include <stdlib.h>
 #include <stdio.h>
+#include <fcntl.h>
 #include <math.h>
-#include <SDL_config.h>
-#include <SDL.h>
-#include <SDL_audio.h>
-
+#include <SDL2/SDL_config.h>
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_audio.h>
+#ifdef __SWITCH__
+#include <switch.h>
+#endif
 #ifdef _MSC_VER //no sleep and usleep (unistd.h) in M$ Win... need to find an alternative
  void sleep(int x){}
  void usleep(int x){}
@@ -76,65 +78,128 @@ unsigned int combinedWF(char num, char channel, unsigned int* wfarray, int index
 void createCombinedWF(unsigned int* wfarray, float bitmul, float bitstrength, float treshold);
 char isExt(char *filename, char* ext);
 
+#ifdef __SWITCH__
+static int consoleValid = 0;
+void switchPrintf(const char *fmt, ...)
+{
+    if (!consoleValid){
+        fflush(stdout);
+        return;
+    }
 
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+    consoleUpdate(NULL);
+}
+#endif
 
+#define printf switchPrintf
 //----------------------------- MAIN thread ----------------------------
 
 
 int main (int argc, char *argv[])
 {
- char playlistmode=0; int playlistcnt=0, startrow=0; 
- long int playlistlen=0, playlistpos=0;
- int readata, strend, subtune_amount, preferred_SID_model[3]={8580.0,8580.0,8580.0}; 
- unsigned int i, datalen, offs, loadaddr;
- FILE *InputFile=NULL, *PlaylistFile=NULL;
- usleep(100000); //wait a bit to avoid keypress leftover (btw this might not happen in Linux)
- //open and process the file
- if (argc<2) { 
-  printf("\ncSID-light by Hermit (Mihaly Horvath) (Year 2017). Usage: \n\n csidl <sid_file> [ subtune_number [SID_modelnumber [seconds]] ]"
-  "\n\n Or playlist mode (filelist inputfile with not .sid extension): "
-  "\n\n csidl <listfile> [ start_row [forced_SID_modelnumber [default_tunelength]] ]"
-  "\n\n (Give '-' where you don't want to specify values, default length: 300 sec.)\n\n"); 
-  return 1; 
- }
- if ( isExt(argv[1],".sid") || isExt(argv[1],".SID") ) {
-  playlistmode=0; //single tune mode
-  if (argc>=3) sscanf(argv[2],"%d",&subtune);  else subtune=0;
-  if (argc>=4) sscanf(argv[3],"%d",&requested_SID_model);
-  if (argc>=5) sscanf(argv[4],"%d",&tunelength);
-  strcpy(filename,argv[1]);
- }
- else { //playlist mode
-  playlistmode=1; playlistlen=playlistpos=0; 
-  if (argc>=3) sscanf(argv[2],"%d",&startrow);
-  if (argc>=4) sscanf(argv[3],"%d",&requested_SID_model);
-  if (argc>=5) sscanf(argv[4],"%d",&default_tunelength);
-  PlaylistFile = fopen(argv[1],"rb"); 
-  if (PlaylistFile==NULL) {printf("Playlist-file not found.\n");return 1;}
-  do { readata=fgetc(PlaylistFile); playlist[playlistlen++]=readata; } while (readata!=EOF && playlistlen<MAX_PLAYLIST_LEN); fclose(PlaylistFile);
- }
- printf("\n"); 
- samplerate = DEFAULT_SAMPLERATE; sampleratio = round(C64_PAL_CPUCLK/samplerate);
- if ( SDL_Init(SDL_INIT_AUDIO) < 0 ) {fprintf(stderr, "Couldn't initialize SDL: %s\n",SDL_GetError()); return(1); }
- SDL_AudioSpec soundspec; soundspec.freq=samplerate; soundspec.channels=1; soundspec.format=AUDIO_S16; soundspec.samples=16384; soundspec.userdata=NULL; soundspec.callback=play;
- if ( SDL_OpenAudio(&soundspec, NULL) < 0 ) { fprintf(stderr, "Couldn't open audio: %s\n", SDL_GetError()); return(2); }
+#ifdef __SWITCH__
+    consoleInit(NULL);
+    consoleClear();
+    consoleValid = 1;
+    printf("Init RomFS.\n");
+    romfsInit();
+    // Configure our supported input layout: a single player with standard controller styles
+    padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+
+    // Initialize the default gamepad (which reads handheld mode inputs as well as the first connected controller)
+    PadState pad;
+    padInitializeDefault(&pad);
+#endif
+    char playlistmode=0; int playlistcnt=0, startrow=0; 
+    long int playlistlen=0, playlistpos=0;
+    int readata, strend, subtune_amount, preferred_SID_model[3]={8580.0,8580.0,8580.0}; 
+    unsigned int i, datalen, offs, loadaddr;
+    FILE *InputFile=NULL, *PlaylistFile=NULL;
+    printf("\ncSID-light by Hermit (Mihaly Horvath) (Year 2017).\n");
+    //open and process the file
+#ifndef __SWITCH__
+    if (argc<2) { 
+    printf("\ncSID-light by Hermit (Mihaly Horvath) (Year 2017). Usage: \n\n csidl <sid_file> [ subtune_number [SID_modelnumber [seconds]] ]"
+    "\n\n Or playlist mode (filelist inputfile with not .sid extension): "
+    "\n\n csidl <listfile> [ start_row [forced_SID_modelnumber [default_tunelength]] ]"
+    "\n\n (Give '-' where you don't want to specify values, default length: 300 sec.)\n\n"); 
+    return 1; 
+    }
+#else
+    playlistmode=1;
+    playlistlen=playlistpos=0;
+    PlaylistFile = fopen("romfs:/playlist.txt","rb");
+    if (PlaylistFile==NULL) {printf("Playlist-file not found.\n");return 1;}
+    do { readata=fgetc(PlaylistFile); playlist[playlistlen++]=readata; } while (readata!=EOF && playlistlen<MAX_PLAYLIST_LEN); fclose(PlaylistFile);
+    printf("Loaded playlist.\n");
+#endif
+
+#ifndef __SWITCH__
+    if (isExt(argv[1],".sid") || isExt(argv[1],".SID") ) {
+        playlistmode=0; //single tune mode
+        if (argc>=3) sscanf(argv[2],"%d",&subtune);  else subtune=0;
+        if (argc>=4) sscanf(argv[3],"%d",&requested_SID_model);
+        if (argc>=5) sscanf(argv[4],"%d",&tunelength);
+        strcpy(filename,argv[1]);
+    } else { //playlist mode
+        playlistmode=1; playlistlen=playlistpos=0; 
+        if (argc>=3) sscanf(argv[2],"%d",&startrow);
+        if (argc>=4) sscanf(argv[3],"%d",&requested_SID_model);
+        if (argc>=5) sscanf(argv[4],"%d",&default_tunelength);
+        PlaylistFile = fopen(argv[1],"rb"); 
+        if (PlaylistFile==NULL) {
+            printf("Playlist-file not found.\n");
+            return 1;
+        }
+        do { 
+            readata=fgetc(PlaylistFile);
+            playlist[playlistlen++]=readata;
+        } while (readata!=EOF && playlistlen<MAX_PLAYLIST_LEN); 
+        fclose(PlaylistFile);
+    }
+ #endif
+
+    printf("\n"); 
+    samplerate = DEFAULT_SAMPLERATE; sampleratio = round(C64_PAL_CPUCLK/samplerate);
+    if ( SDL_Init(SDL_INIT_AUDIO) < 0 ) {fprintf(stderr, "Couldn't initialize SDL: %s\n",SDL_GetError()); return(1); }
+    SDL_AudioSpec soundspec; soundspec.freq=samplerate; soundspec.channels=1; soundspec.format=AUDIO_S16; soundspec.samples=16384; soundspec.userdata=NULL; soundspec.callback=play;
+    if ( SDL_OpenAudio(&soundspec, NULL) < 0 ) { fprintf(stderr, "Couldn't open audio: %s\n", SDL_GetError()); return(2); }
 
 openSID: //I know I know, goto is harmful to you! But my code is ugly anyway. :)
- if (playlistmode) {
-  if (++playlistcnt>=startrow) { subtune=1;
-   if (!sscanf(&playlist[playlistpos],"%s",&filename[0]) || strlen(filename)<4)
-   { printf("\nReached end of playlist.\n\n"); SDL_PauseAudio(1);SDL_CloseAudio(); return 0; } 
-   printf("\nTune %d: ",playlistcnt); playlistpos+=strlen(filename); 
-   if (sscanf(&playlist[playlistpos],"%d:%d:%d",&minutes,&seconds,&subtune)>=2) tunelength=60*minutes+seconds; 
-   else if (sscanf(&playlist[playlistpos],"%d",&seconds)) { minutes=0; tunelength=seconds; }
-   else tunelength=default_tunelength;
-  }
-  for(i=0; i<MAX_PLAYLIST_ROWLEN; i++) 
-   if(playlist[playlistpos+i]=='\n' || playlistpos+i==playlistlen-2) {playlistpos+=i+1; break;}
-  if(playlistcnt<startrow) goto openSID;
- }
- InputFile = fopen(filename,"rb"); if (InputFile==NULL) 
- { printf("SID file %s not found.\n",filename); if(playlistmode) goto openSID; else return(1); }
+    if (playlistmode) {
+        if (++playlistcnt>=startrow) {
+            subtune=1;
+            if (!sscanf(&playlist[playlistpos],"%s",&filename[0]) || strlen(filename)<4)
+            { 
+                printf("\nReached end of playlist.\n\n");
+                goto exitCleanUp;
+            } 
+            printf("\nTune %d: ",playlistcnt); playlistpos+=strlen(filename); 
+            if (sscanf(&playlist[playlistpos],"%d:%d:%d",&minutes,&seconds,&subtune)>=2) {
+                tunelength=60*minutes+seconds;
+            }
+        } else if (sscanf(&playlist[playlistpos],"%d",&seconds)) {
+            minutes=0;
+            tunelength=seconds; 
+        }else{
+            tunelength=default_tunelength;
+        }
+
+        for(i=0; i<MAX_PLAYLIST_ROWLEN; i++) 
+            if(playlist[playlistpos+i]=='\n' || playlistpos+i==playlistlen-2) {playlistpos+=i+1; break;}
+
+        if(playlistcnt<startrow) goto openSID;
+    }
+    InputFile = fopen(filename,"rb");
+    if (InputFile==NULL) { 
+        printf("SID file %s not found.\n",filename);
+        if(playlistmode) goto openSID; else goto exitCleanUp;
+    }
+
  datalen=0; do { readata=fgetc(InputFile); filedata[datalen++]=readata; } while (readata!=EOF && datalen<MAX_DATA_LEN); 
  subtune--; if (subtune<0 || subtune>63) subtune=0;
  printf("%d bytes read (%s subtune %d)",--datalen,filename,subtune+1); fclose(InputFile);
@@ -160,15 +225,53 @@ openSID: //I know I know, goto is harmful to you! But my code is ugly anyway. :)
   if (requested_SID_model==8580 || requested_SID_model==6581) SID_model[i] = requested_SID_model;
   else SID_model[i] = preferred_SID_model[i];
  }
- OUTPUT_SCALEDOWN = SID_CHANNEL_AMOUNT * 16 + 26; 
+ OUTPUT_SCALEDOWN = SID_CHANNEL_AMOUNT * 16 + 26;
  if (SIDamount==2) OUTPUT_SCALEDOWN /= 0.6;
  else if (SIDamount>=3) OUTPUT_SCALEDOWN /= 0.4;
  cSID_init(samplerate); init(subtune);  
  SDL_PauseAudio(0); 
- fflush(stdin); if(tunelength!=-1) sleep(tunelength); else { printf("Press Enter to abort playback...\n"); getchar(); }
+ fflush(stdin);
+ 
+Uint32 requested_time = (tunelength * 1000) + SDL_GetTicks();
+Uint32 start_time = SDL_GetTicks();
+    printf("Time Start: %u, %u\n", requested_time, SDL_GetTicks());
+while (appletMainLoop()) {
+    // Scan the gamepad. This should be done once for each frame
+    padUpdate(&pad);
+    u64 kDown = padGetButtonsDown(&pad);
+    u64 kHeld = padGetButtons(&pad);
+    u64 kUp = padGetButtonsUp(&pad);
 
+    if (kDown & HidNpadButton_Plus) goto exitCleanUp;
+    if (kDown & HidNpadButton_A) break;
+    if (kDown & HidNpadButton_B && playlistmode) {
+        if(playlistpos > 0){
+            playlistpos-=1;
+            playlistpos-=strlen(filename);
+        }
+
+        break;
+    }
+
+    if (requested_time < SDL_GetTicks()) {
+        if (tunelength != -1) {
+            printf("Song has ended.\n");
+            break;
+        }
+    }
+    SDL_Delay(1000 / 60); // limit to 60 FPS
+}
+    printf("Time End: %u, %u\n", requested_time, SDL_GetTicks());
  SDL_PauseAudio(1);  if(playlistmode) goto openSID;
+exitCleanUp:
  SDL_CloseAudio(); 
+exit:
+#ifdef __SWITCH__
+  if (!consoleValid) return 0;
+  consoleUpdate(NULL);
+  consoleExit(NULL);
+  consoleValid = 0;
+#endif
  return 0;
 }
 
@@ -380,9 +483,9 @@ void cSID_init(int samplerate)
  //cutoff_top_6581 = 20000; //Hz // (26000/0.47);  // 1 - exp( -2 * 3.14 * (26000/0.47) / samplerate);   //cutoff range is 9 octaves stated by datasheet, but process variation might eliminate any filter spec.
  //cutoff_ratio_6581 = -2 * 3.14 * (cutoff_top_6581 / 2048) / samplerate; //(cutoff_top_6581-cutoff_bottom_6581)/(2048.0-192.0); //datasheet: 30Hz..12kHz with 2.2pF -> 140Hz..56kHz with 470pF?
 
- createCombinedWF(TriSaw_8580, 0.8, 2.4, 0.64);
- createCombinedWF(PulseSaw_8580, 1.4, 1.9, 0.68);
- createCombinedWF(PulseTriSaw_8580, 0.8, 2.5, 0.64);
+createCombinedWF(TriSaw_8580, 0.8, 2.4, 0.64);
+createCombinedWF(PulseSaw_8580, 1.4, 1.9, 0.68);
+createCombinedWF(PulseTriSaw_8580, 0.8, 2.5, 0.64);
     
  for(i = 0; i < 9; i++) {
   ADSRstate[i] = HOLDZERO_BITMASK; envcnt[i] = 0; ratecnt[i] = 0; 
